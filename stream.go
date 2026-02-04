@@ -31,6 +31,7 @@ import (
 
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/encoding"
 	"google.golang.org/grpc/internal"
 	"google.golang.org/grpc/internal/balancerload"
@@ -350,6 +351,16 @@ func newClientStreamWithParams(ctx context.Context, desc *StreamDesc, cc *Client
 		callHdr.Creds = callInfo.creds
 	}
 
+	// Check if credentials implement WaitForAuthCredentials for blocking auth
+	var waitForAuth bool
+	var validateAuthFn func(responseHeaders map[string][]string) error
+	if callInfo.creds != nil {
+		if wac, ok := callInfo.creds.(credentials.WaitForAuthCredentials); ok && wac.WaitForServerAuth() {
+			waitForAuth = true
+			validateAuthFn = wac.ValidateAuthResponse
+		}
+	}
+
 	cs := &clientStream{
 		callHdr:             callHdr,
 		ctx:                 ctx,
@@ -365,6 +376,8 @@ func newClientStreamWithParams(ctx context.Context, desc *StreamDesc, cc *Client
 		firstAttempt:        true,
 		onCommit:            onCommit,
 		nameResolutionDelay: nameResolutionDelayed,
+		waitForAuth:         waitForAuth,
+		validateAuthFn:      validateAuthFn,
 	}
 	if !cc.dopts.disableRetry {
 		cs.retryThrottler = cc.retryThrottler.Load().(*retryThrottler)
@@ -623,6 +636,21 @@ type clientStream struct {
 	// nameResolutionDelay indicates if there was a delay in the name resolution.
 	// This field is only valid on client side, it's always false on server side.
 	nameResolutionDelay bool
+
+	// waitForAuth indicates whether the client should wait for authentication
+	// confirmation from the server before sending messages. This is set when
+	// the credentials implement WaitForAuthCredentials and WaitForServerAuth() returns true.
+	waitForAuth bool
+	// authConfirmed indicates whether the server has confirmed authentication.
+	// Once set to true, subsequent SendMsg calls proceed without blocking.
+	authConfirmed bool
+	// authOnce ensures auth confirmation is only performed once.
+	authOnce sync.Once
+	// validateAuthFn is the function to validate auth response from server headers.
+	// Set from WaitForAuthCredentials.ValidateAuthResponse when waitForAuth is true.
+	validateAuthFn func(responseHeaders map[string][]string) error
+	// authErr stores any error from auth validation, to be returned on subsequent SendMsg calls.
+	authErr error
 }
 
 type replayOp struct {
@@ -912,6 +940,36 @@ func (cs *clientStream) Trailer() metadata.MD {
 	return cs.attempt.transportStream.Trailer()
 }
 
+// waitForAuthConfirmation waits for authentication confirmation from the server
+// before allowing subsequent messages to be sent. This is called when credentials
+// implement WaitForAuthCredentials and WaitForServerAuth() returns true.
+//
+// The method uses sync.Once to ensure auth validation is performed exactly once,
+// even if multiple goroutines call SendMsg concurrently.
+func (cs *clientStream) waitForAuthConfirmation() error {
+	cs.authOnce.Do(func() {
+		// Get response headers from server - this will block until server sends headers
+		responseHeaders, err := cs.Header()
+		if err != nil {
+			cs.authErr = status.Errorf(codes.Unauthenticated, "failed to get response headers for auth: %v", err)
+			return
+		}
+
+		// Validate the auth response using the credentials' ValidateAuthResponse method
+		if cs.validateAuthFn != nil {
+			if err := cs.validateAuthFn(responseHeaders); err != nil {
+				cs.authErr = status.Errorf(codes.Unauthenticated, "auth validation failed: %v", err)
+				return
+			}
+		}
+
+		// Auth confirmed successfully
+		cs.authConfirmed = true
+	})
+
+	return cs.authErr
+}
+
 func (cs *clientStream) replayBufferLocked(attempt *csAttempt) error {
 	for _, f := range cs.replayBuffer {
 		if err := f.op(attempt); err != nil {
@@ -946,6 +1004,16 @@ func (cs *clientStream) SendMsg(m any) (err error) {
 			cs.finish(err)
 		}
 	}()
+
+	// If credentials require auth confirmation, wait for server response before sending.
+	// This is used for streaming RPCs where the server validates auth (e.g., JWT tokens)
+	// and we need to confirm auth before sending subsequent messages.
+	if cs.waitForAuth && !cs.authConfirmed {
+		if err := cs.waitForAuthConfirmation(); err != nil {
+			return err
+		}
+	}
+
 	if cs.sentLast {
 		return status.Errorf(codes.Internal, "SendMsg called after CloseSend")
 	}

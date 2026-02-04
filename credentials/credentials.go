@@ -51,6 +51,36 @@ type PerRPCCredentials interface {
 	RequireTransportSecurity() bool
 }
 
+// WaitForAuthCredentials is an optional interface that can be implemented by
+// PerRPCCredentials to indicate that the client should wait for authentication
+// confirmation from the server before sending messages on a stream.
+//
+// This is useful for bidirectional streaming RPCs where the server validates
+// credentials (e.g., JWT tokens) and sends back a response. Without this,
+// messages could be sent before authentication validation is complete on the
+// server side, leading to potential message loss if auth fails.
+//
+// When implemented, the client will:
+//  1. Send the initial request with credentials
+//  2. Wait for server response headers
+//  3. Call ValidateAuthResponse to validate the auth result
+//  4. Only then allow subsequent messages to be sent
+//
+// This API is experimental.
+type WaitForAuthCredentials interface {
+	PerRPCCredentials
+	// WaitForServerAuth indicates whether the client should wait for authentication
+	// confirmation from the server before sending messages. If this returns true,
+	// the client will block on SendMsg until the server has responded and the
+	// response has been validated via ValidateAuthResponse.
+	WaitForServerAuth() bool
+	// ValidateAuthResponse validates the server's response headers to confirm
+	// authentication was successful. This is called after receiving the server's
+	// initial response headers. Returns nil if auth is confirmed, or an error
+	// if auth failed. The error will be returned to the caller of SendMsg.
+	ValidateAuthResponse(responseHeaders map[string][]string) error
+}
+
 // SecurityLevel defines the protection level on an established connection.
 //
 // This API is experimental.

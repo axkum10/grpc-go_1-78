@@ -21,6 +21,7 @@ package credentials
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -319,4 +320,243 @@ func tlsClientHandshake(conn net.Conn, _ string) (AuthInfo, error) {
 		return nil, err
 	}
 	return TLSInfo{State: clientConn.ConnectionState(), CommonAuthInfo: CommonAuthInfo{SecurityLevel: PrivacyAndIntegrity}}, nil
+}
+
+// testWaitForAuthCredentials implements WaitForAuthCredentials for testing.
+type testWaitForAuthCredentials struct {
+	token                string
+	waitForAuth          bool
+	validateShouldPass   bool
+	getMetadataCalled    bool
+	validateAuthCalled   bool
+	waitForAuthCalled    bool
+	requireTransportSec  bool
+}
+
+func (c *testWaitForAuthCredentials) GetRequestMetadata(ctx context.Context, uri ...string) (map[string]string, error) {
+	c.getMetadataCalled = true
+	return map[string]string{"authorization": "Bearer " + c.token}, nil
+}
+
+func (c *testWaitForAuthCredentials) RequireTransportSecurity() bool {
+	return c.requireTransportSec
+}
+
+func (c *testWaitForAuthCredentials) WaitForServerAuth() bool {
+	c.waitForAuthCalled = true
+	return c.waitForAuth
+}
+
+func (c *testWaitForAuthCredentials) ValidateAuthResponse(responseHeaders map[string][]string) error {
+	c.validateAuthCalled = true
+	if !c.validateShouldPass {
+		return errors.New("auth validation failed: invalid token")
+	}
+	// Check for expected auth confirmation header
+	if authStatus, ok := responseHeaders["x-auth-status"]; ok {
+		if len(authStatus) > 0 && authStatus[0] == "confirmed" {
+			return nil
+		}
+	}
+	// No explicit rejection, auth passes by default in this test
+	return nil
+}
+
+// testNonBlockingCredentials implements only PerRPCCredentials (not WaitForAuthCredentials)
+// for backward compatibility testing.
+type testNonBlockingCredentials struct {
+	token string
+}
+
+func (c *testNonBlockingCredentials) GetRequestMetadata(ctx context.Context, uri ...string) (map[string]string, error) {
+	return map[string]string{"authorization": "Bearer " + c.token}, nil
+}
+
+func (c *testNonBlockingCredentials) RequireTransportSecurity() bool {
+	return false
+}
+
+func (s) TestWaitForAuthCredentials_ImplementsInterface(t *testing.T) {
+	// Test that testWaitForAuthCredentials implements WaitForAuthCredentials
+	var _ WaitForAuthCredentials = &testWaitForAuthCredentials{}
+
+	// Test that testNonBlockingCredentials implements PerRPCCredentials but NOT WaitForAuthCredentials
+	var _ PerRPCCredentials = &testNonBlockingCredentials{}
+
+	// Verify that testNonBlockingCredentials does NOT implement WaitForAuthCredentials
+	creds := &testNonBlockingCredentials{token: "test-token"}
+	_, ok := interface{}(creds).(WaitForAuthCredentials)
+	if ok {
+		t.Fatal("testNonBlockingCredentials should not implement WaitForAuthCredentials")
+	}
+}
+
+func (s) TestWaitForAuthCredentials_WaitForServerAuth(t *testing.T) {
+	testCases := []struct {
+		name                string
+		waitForAuth         bool
+		expectedWaitForAuth bool
+	}{
+		{
+			name:                "WaitForServerAuth returns true",
+			waitForAuth:         true,
+			expectedWaitForAuth: true,
+		},
+		{
+			name:                "WaitForServerAuth returns false",
+			waitForAuth:         false,
+			expectedWaitForAuth: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			creds := &testWaitForAuthCredentials{
+				token:       "test-token",
+				waitForAuth: tc.waitForAuth,
+			}
+
+			result := creds.WaitForServerAuth()
+			if result != tc.expectedWaitForAuth {
+				t.Errorf("WaitForServerAuth() = %v, want %v", result, tc.expectedWaitForAuth)
+			}
+			if !creds.waitForAuthCalled {
+				t.Error("WaitForServerAuth was not called")
+			}
+		})
+	}
+}
+
+func (s) TestWaitForAuthCredentials_ValidateAuthResponse(t *testing.T) {
+	testCases := []struct {
+		name              string
+		validateShouldPass bool
+		responseHeaders   map[string][]string
+		expectError       bool
+	}{
+		{
+			name:              "Valid auth response with confirmation header",
+			validateShouldPass: true,
+			responseHeaders: map[string][]string{
+				"x-auth-status": {"confirmed"},
+			},
+			expectError: false,
+		},
+		{
+			name:              "Valid auth response without explicit confirmation",
+			validateShouldPass: true,
+			responseHeaders:   map[string][]string{},
+			expectError:       false,
+		},
+		{
+			name:              "Invalid auth response",
+			validateShouldPass: false,
+			responseHeaders: map[string][]string{
+				"x-auth-status": {"denied"},
+			},
+			expectError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			creds := &testWaitForAuthCredentials{
+				token:              "test-token",
+				waitForAuth:        true,
+				validateShouldPass: tc.validateShouldPass,
+			}
+
+			err := creds.ValidateAuthResponse(tc.responseHeaders)
+
+			if tc.expectError && err == nil {
+				t.Error("ValidateAuthResponse() expected error, got nil")
+			}
+			if !tc.expectError && err != nil {
+				t.Errorf("ValidateAuthResponse() unexpected error: %v", err)
+			}
+			if !creds.validateAuthCalled {
+				t.Error("ValidateAuthResponse was not called")
+			}
+		})
+	}
+}
+
+func (s) TestWaitForAuthCredentials_TypeAssertion(t *testing.T) {
+	// Test type assertion from PerRPCCredentials to WaitForAuthCredentials
+	var baseCreds PerRPCCredentials = &testWaitForAuthCredentials{
+		token:       "test-token",
+		waitForAuth: true,
+	}
+
+	// Should be able to type assert to WaitForAuthCredentials
+	waitCreds, ok := baseCreds.(WaitForAuthCredentials)
+	if !ok {
+		t.Fatal("Failed to type assert PerRPCCredentials to WaitForAuthCredentials")
+	}
+
+	if !waitCreds.WaitForServerAuth() {
+		t.Error("WaitForServerAuth() should return true")
+	}
+
+	// Test that non-blocking credentials cannot be type asserted
+	var nonBlockingCreds PerRPCCredentials = &testNonBlockingCredentials{token: "test"}
+	_, ok = nonBlockingCreds.(WaitForAuthCredentials)
+	if ok {
+		t.Error("testNonBlockingCredentials should not be assertable to WaitForAuthCredentials")
+	}
+}
+
+func (s) TestWaitForAuthCredentials_GetRequestMetadata(t *testing.T) {
+	creds := &testWaitForAuthCredentials{
+		token:       "my-jwt-token",
+		waitForAuth: true,
+	}
+
+	ctx := context.Background()
+	metadata, err := creds.GetRequestMetadata(ctx, "https://example.com")
+	if err != nil {
+		t.Fatalf("GetRequestMetadata failed: %v", err)
+	}
+
+	if !creds.getMetadataCalled {
+		t.Error("GetRequestMetadata was not called")
+	}
+
+	expectedAuth := "Bearer my-jwt-token"
+	if metadata["authorization"] != expectedAuth {
+		t.Errorf("authorization header = %q, want %q", metadata["authorization"], expectedAuth)
+	}
+}
+
+func (s) TestWaitForAuthCredentials_RequireTransportSecurity(t *testing.T) {
+	testCases := []struct {
+		name                    string
+		requireTransportSec     bool
+		expectedTransportSec    bool
+	}{
+		{
+			name:                 "Requires transport security",
+			requireTransportSec:  true,
+			expectedTransportSec: true,
+		},
+		{
+			name:                 "Does not require transport security",
+			requireTransportSec:  false,
+			expectedTransportSec: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			creds := &testWaitForAuthCredentials{
+				token:               "test-token",
+				requireTransportSec: tc.requireTransportSec,
+			}
+
+			result := creds.RequireTransportSecurity()
+			if result != tc.expectedTransportSec {
+				t.Errorf("RequireTransportSecurity() = %v, want %v", result, tc.expectedTransportSec)
+			}
+		})
+	}
 }
