@@ -322,47 +322,47 @@ func tlsClientHandshake(conn net.Conn, _ string) (AuthInfo, error) {
 	return TLSInfo{State: clientConn.ConnectionState(), CommonAuthInfo: CommonAuthInfo{SecurityLevel: PrivacyAndIntegrity}}, nil
 }
 
-// testWaitForAuthCredentials implements WaitForAuthCredentials for testing.
-type testWaitForAuthCredentials struct {
-	token                string
-	waitForAuth          bool
-	validateShouldPass   bool
-	getMetadataCalled    bool
-	validateAuthCalled   bool
-	waitForAuthCalled    bool
-	requireTransportSec  bool
+// testWaitForStreamFunctionalReady implements WaitForStreamFunctionalReady for testing
+type testWaitForStreamFunctionalReady struct {
+	token                       string
+	waitForFunctionalReady      bool
+	validateShouldPass          bool
+	getMetadataCalled           bool
+	validateFunctionalReadyCalled bool
+	waitForFunctionalReadyCalled  bool
+	requireTransportSec         bool
 }
 
-func (c *testWaitForAuthCredentials) GetRequestMetadata(ctx context.Context, uri ...string) (map[string]string, error) {
+func (c *testWaitForStreamFunctionalReady) GetRequestMetadata(ctx context.Context, uri ...string) (map[string]string, error) {
 	c.getMetadataCalled = true
 	return map[string]string{"authorization": "Bearer " + c.token}, nil
 }
 
-func (c *testWaitForAuthCredentials) RequireTransportSecurity() bool {
+func (c *testWaitForStreamFunctionalReady) RequireTransportSecurity() bool {
 	return c.requireTransportSec
 }
 
-func (c *testWaitForAuthCredentials) WaitForServerAuth() bool {
-	c.waitForAuthCalled = true
-	return c.waitForAuth
+func (c *testWaitForStreamFunctionalReady) WaitForStreamFunctionalReady() bool {
+	c.waitForFunctionalReadyCalled = true
+	return c.waitForFunctionalReady
 }
 
-func (c *testWaitForAuthCredentials) ValidateAuthResponse(responseHeaders map[string][]string) error {
-	c.validateAuthCalled = true
+func (c *testWaitForStreamFunctionalReady) ValidateStreamFunctionalReady(responseHeaders map[string][]string) error {
+	c.validateFunctionalReadyCalled = true
 	if !c.validateShouldPass {
-		return errors.New("auth validation failed: invalid token")
+		return errors.New("stream functional ready validation failed: server not ready")
 	}
-	// Check for expected auth confirmation header
-	if authStatus, ok := responseHeaders["x-auth-status"]; ok {
-		if len(authStatus) > 0 && authStatus[0] == "confirmed" {
+	// Check for expected ready confirmation header
+	if readyStatus, ok := responseHeaders["x-stream-ready"]; ok {
+		if len(readyStatus) > 0 && readyStatus[0] == "true" {
 			return nil
 		}
 	}
-	// No explicit rejection, auth passes by default in this test
+	// No explicit rejection, passes by default in this test
 	return nil
 }
 
-// testNonBlockingCredentials implements only PerRPCCredentials (not WaitForAuthCredentials)
+// testNonBlockingCredentials implements only PerRPCCredentials (not WaitForStreamFunctionalReady)
 // for backward compatibility testing.
 type testNonBlockingCredentials struct {
 	token string
@@ -376,58 +376,58 @@ func (c *testNonBlockingCredentials) RequireTransportSecurity() bool {
 	return false
 }
 
-func (s) TestWaitForAuthCredentials_ImplementsInterface(t *testing.T) {
-	// Test that testWaitForAuthCredentials implements WaitForAuthCredentials
-	var _ WaitForAuthCredentials = &testWaitForAuthCredentials{}
+func (s) TestWaitForStreamFunctionalReady_ImplementsInterface(t *testing.T) {
+	// Test that testWaitForStreamFunctionalReady implements WaitForStreamFunctionalReady
+	var _ WaitForStreamFunctionalReady = &testWaitForStreamFunctionalReady{}
 
-	// Test that testNonBlockingCredentials implements PerRPCCredentials but NOT WaitForAuthCredentials
+	// Test that testNonBlockingCredentials implements PerRPCCredentials but NOT WaitForStreamFunctionalReady
 	var _ PerRPCCredentials = &testNonBlockingCredentials{}
 
-	// Verify that testNonBlockingCredentials does NOT implement WaitForAuthCredentials
+	// Verify that testNonBlockingCredentials does NOT implement WaitForStreamFunctionalReady
 	creds := &testNonBlockingCredentials{token: "test-token"}
-	_, ok := interface{}(creds).(WaitForAuthCredentials)
+	_, ok := interface{}(creds).(WaitForStreamFunctionalReady)
 	if ok {
-		t.Fatal("testNonBlockingCredentials should not implement WaitForAuthCredentials")
+		t.Fatal("testNonBlockingCredentials should not implement WaitForStreamFunctionalReady")
 	}
 }
 
-func (s) TestWaitForAuthCredentials_WaitForServerAuth(t *testing.T) {
+func (s) TestWaitForStreamFunctionalReady_WaitForStreamFunctionalReady(t *testing.T) {
 	testCases := []struct {
-		name                string
-		waitForAuth         bool
-		expectedWaitForAuth bool
+		name                       string
+		waitForFunctionalReady     bool
+		expectedWaitForFunctionalReady bool
 	}{
 		{
-			name:                "WaitForServerAuth returns true",
-			waitForAuth:         true,
-			expectedWaitForAuth: true,
+			name:                       "WaitForStreamFunctionalReady returns true",
+			waitForFunctionalReady:     true,
+			expectedWaitForFunctionalReady: true,
 		},
 		{
-			name:                "WaitForServerAuth returns false",
-			waitForAuth:         false,
-			expectedWaitForAuth: false,
+			name:                       "WaitForStreamFunctionalReady returns false",
+			waitForFunctionalReady:     false,
+			expectedWaitForFunctionalReady: false,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			creds := &testWaitForAuthCredentials{
-				token:       "test-token",
-				waitForAuth: tc.waitForAuth,
+			creds := &testWaitForStreamFunctionalReady{
+				token:                  "test-token",
+				waitForFunctionalReady: tc.waitForFunctionalReady,
 			}
 
-			result := creds.WaitForServerAuth()
-			if result != tc.expectedWaitForAuth {
-				t.Errorf("WaitForServerAuth() = %v, want %v", result, tc.expectedWaitForAuth)
+			result := creds.WaitForStreamFunctionalReady()
+			if result != tc.expectedWaitForFunctionalReady {
+				t.Errorf("WaitForStreamFunctionalReady() = %v, want %v", result, tc.expectedWaitForFunctionalReady)
 			}
-			if !creds.waitForAuthCalled {
-				t.Error("WaitForServerAuth was not called")
+			if !creds.waitForFunctionalReadyCalled {
+				t.Error("WaitForStreamFunctionalReady was not called")
 			}
 		})
 	}
 }
 
-func (s) TestWaitForAuthCredentials_ValidateAuthResponse(t *testing.T) {
+func (s) TestWaitForStreamFunctionalReady_ValidateStreamFunctionalReady(t *testing.T) {
 	testCases := []struct {
 		name              string
 		validateShouldPass bool
@@ -435,24 +435,24 @@ func (s) TestWaitForAuthCredentials_ValidateAuthResponse(t *testing.T) {
 		expectError       bool
 	}{
 		{
-			name:              "Valid auth response with confirmation header",
+			name:              "Valid ready response with confirmation header",
 			validateShouldPass: true,
 			responseHeaders: map[string][]string{
-				"x-auth-status": {"confirmed"},
+				"x-stream-ready": {"true"},
 			},
 			expectError: false,
 		},
 		{
-			name:              "Valid auth response without explicit confirmation",
+			name:              "Valid ready response without explicit confirmation",
 			validateShouldPass: true,
 			responseHeaders:   map[string][]string{},
 			expectError:       false,
 		},
 		{
-			name:              "Invalid auth response",
+			name:              "Invalid ready response - server not ready",
 			validateShouldPass: false,
 			responseHeaders: map[string][]string{
-				"x-auth-status": {"denied"},
+				"x-stream-ready": {"false"},
 			},
 			expectError: true,
 		},
@@ -460,56 +460,56 @@ func (s) TestWaitForAuthCredentials_ValidateAuthResponse(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			creds := &testWaitForAuthCredentials{
-				token:              "test-token",
-				waitForAuth:        true,
-				validateShouldPass: tc.validateShouldPass,
+			creds := &testWaitForStreamFunctionalReady{
+				token:                  "test-token",
+				waitForFunctionalReady: true,
+				validateShouldPass:     tc.validateShouldPass,
 			}
 
-			err := creds.ValidateAuthResponse(tc.responseHeaders)
+			err := creds.ValidateStreamFunctionalReady(tc.responseHeaders)
 
 			if tc.expectError && err == nil {
-				t.Error("ValidateAuthResponse() expected error, got nil")
+				t.Error("ValidateStreamFunctionalReady() expected error, got nil")
 			}
 			if !tc.expectError && err != nil {
-				t.Errorf("ValidateAuthResponse() unexpected error: %v", err)
+				t.Errorf("ValidateStreamFunctionalReady() unexpected error: %v", err)
 			}
-			if !creds.validateAuthCalled {
-				t.Error("ValidateAuthResponse was not called")
+			if !creds.validateFunctionalReadyCalled {
+				t.Error("ValidateStreamFunctionalReady was not called")
 			}
 		})
 	}
 }
 
-func (s) TestWaitForAuthCredentials_TypeAssertion(t *testing.T) {
-	// Test type assertion from PerRPCCredentials to WaitForAuthCredentials
-	var baseCreds PerRPCCredentials = &testWaitForAuthCredentials{
-		token:       "test-token",
-		waitForAuth: true,
+func (s) TestWaitForStreamFunctionalReady_TypeAssertion(t *testing.T) {
+	// Test type assertion from PerRPCCredentials to WaitForStreamFunctionalReady
+	var baseCreds PerRPCCredentials = &testWaitForStreamFunctionalReady{
+		token:                  "test-token",
+		waitForFunctionalReady: true,
 	}
 
-	// Should be able to type assert to WaitForAuthCredentials
-	waitCreds, ok := baseCreds.(WaitForAuthCredentials)
+	// Should be able to type assert to WaitForStreamFunctionalReady
+	waitCreds, ok := baseCreds.(WaitForStreamFunctionalReady)
 	if !ok {
-		t.Fatal("Failed to type assert PerRPCCredentials to WaitForAuthCredentials")
+		t.Fatal("Failed to type assert PerRPCCredentials to WaitForStreamFunctionalReady")
 	}
 
-	if !waitCreds.WaitForServerAuth() {
-		t.Error("WaitForServerAuth() should return true")
+	if !waitCreds.WaitForStreamFunctionalReady() {
+		t.Error("WaitForStreamFunctionalReady() should return true")
 	}
 
 	// Test that non-blocking credentials cannot be type asserted
 	var nonBlockingCreds PerRPCCredentials = &testNonBlockingCredentials{token: "test"}
-	_, ok = nonBlockingCreds.(WaitForAuthCredentials)
+	_, ok = nonBlockingCreds.(WaitForStreamFunctionalReady)
 	if ok {
-		t.Error("testNonBlockingCredentials should not be assertable to WaitForAuthCredentials")
+		t.Error("testNonBlockingCredentials should not be assertable to WaitForStreamFunctionalReady")
 	}
 }
 
-func (s) TestWaitForAuthCredentials_GetRequestMetadata(t *testing.T) {
-	creds := &testWaitForAuthCredentials{
-		token:       "my-jwt-token",
-		waitForAuth: true,
+func (s) TestWaitForStreamFunctionalReady_GetRequestMetadata(t *testing.T) {
+	creds := &testWaitForStreamFunctionalReady{
+		token:                  "my-jwt-token",
+		waitForFunctionalReady: true,
 	}
 
 	ctx := context.Background()
@@ -528,7 +528,7 @@ func (s) TestWaitForAuthCredentials_GetRequestMetadata(t *testing.T) {
 	}
 }
 
-func (s) TestWaitForAuthCredentials_RequireTransportSecurity(t *testing.T) {
+func (s) TestWaitForStreamFunctionalReady_RequireTransportSecurity(t *testing.T) {
 	testCases := []struct {
 		name                    string
 		requireTransportSec     bool
@@ -548,7 +548,7 @@ func (s) TestWaitForAuthCredentials_RequireTransportSecurity(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			creds := &testWaitForAuthCredentials{
+			creds := &testWaitForStreamFunctionalReady{
 				token:               "test-token",
 				requireTransportSec: tc.requireTransportSec,
 			}

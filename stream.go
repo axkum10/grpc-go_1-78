@@ -351,13 +351,13 @@ func newClientStreamWithParams(ctx context.Context, desc *StreamDesc, cc *Client
 		callHdr.Creds = callInfo.creds
 	}
 
-	// Check if credentials implement WaitForAuthCredentials for blocking auth
-	var waitForAuth bool
-	var validateAuthFn func(responseHeaders map[string][]string) error
+	// Check if credentials implement WaitForStreamFunctionalReady for blocking until server ready
+	var waitForFunctionalReady bool
+	var validateFunctionalReadyFn func(responseHeaders map[string][]string) error
 	if callInfo.creds != nil {
-		if wac, ok := callInfo.creds.(credentials.WaitForAuthCredentials); ok && wac.WaitForServerAuth() {
-			waitForAuth = true
-			validateAuthFn = wac.ValidateAuthResponse
+		if sfrc, ok := callInfo.creds.(credentials.WaitForStreamFunctionalReady); ok && sfrc.WaitForStreamFunctionalReady() {
+			waitForFunctionalReady = true
+			validateFunctionalReadyFn = sfrc.ValidateStreamFunctionalReady
 		}
 	}
 
@@ -374,10 +374,10 @@ func newClientStreamWithParams(ctx context.Context, desc *StreamDesc, cc *Client
 		compressorV1:        compressorV1,
 		cancel:              cancel,
 		firstAttempt:        true,
-		onCommit:            onCommit,
-		nameResolutionDelay: nameResolutionDelayed,
-		waitForAuth:         waitForAuth,
-		validateAuthFn:      validateAuthFn,
+		onCommit:                  onCommit,
+		nameResolutionDelay:       nameResolutionDelayed,
+		waitForFunctionalReady:    waitForFunctionalReady,
+		validateFunctionalReadyFn: validateFunctionalReadyFn,
 	}
 	if !cc.dopts.disableRetry {
 		cs.retryThrottler = cc.retryThrottler.Load().(*retryThrottler)
@@ -637,21 +637,22 @@ type clientStream struct {
 	// This field is only valid on client side, it's always false on server side.
 	nameResolutionDelay bool
 
-	// waitForAuth indicates whether the client should wait for authentication
-	// confirmation from the server before sending messages. This is set when
-	// the credentials implement WaitForAuthCredentials and WaitForServerAuth() returns true.
+	// waitForFunctionalReady indicates whether the client should wait for functional
+	// readiness confirmation from the server before sending messages. This is set when
+	// the credentials implement WaitForStreamFunctionalReady and
+	// WaitForStreamFunctionalReady() returns true.
 	// See https://github.com/grpc/grpc-go/issues/8861 for more details.
-	waitForAuth bool
-	// authConfirmed indicates whether the server has confirmed authentication.
+	waitForFunctionalReady bool
+	// functionalReadyConfirmed indicates whether the server has confirmed functional readiness.
 	// Once set to true, subsequent SendMsg calls proceed without blocking.
-	authConfirmed bool
-	// authOnce ensures auth confirmation is only performed once.
-	authOnce sync.Once
-	// validateAuthFn is the function to validate auth response from server headers.
-	// Set from WaitForAuthCredentials.ValidateAuthResponse when waitForAuth is true.
-	validateAuthFn func(responseHeaders map[string][]string) error
-	// authErr stores any error from auth validation, to be returned on subsequent SendMsg calls.
-	authErr error
+	functionalReadyConfirmed bool
+	// functionalReadyOnce ensures functional ready confirmation is only performed once.
+	functionalReadyOnce sync.Once
+	// validateFunctionalReadyFn is the function to validate functional ready response from server headers.
+	// Set from WaitForStreamFunctionalReady.ValidateStreamFunctionalReady when waitForFunctionalReady is true.
+	validateFunctionalReadyFn func(responseHeaders map[string][]string) error
+	// functionalReadyErr stores any error from functional ready validation, to be returned on subsequent SendMsg calls.
+	functionalReadyErr error
 }
 
 type replayOp struct {
@@ -941,34 +942,34 @@ func (cs *clientStream) Trailer() metadata.MD {
 	return cs.attempt.transportStream.Trailer()
 }
 
-// waitForAuthConfirmation waits for authentication confirmation from the server
+// waitForFunctionalReadyConfirmation waits for functional readiness confirmation from the server
 // before allowing subsequent messages to be sent. This is called when credentials
-// implement WaitForAuthCredentials and WaitForServerAuth() returns true.
+// implement WaitForStreamFunctionalReady and WaitForStreamFunctionalReady() returns true.
 //
-// The method uses sync.Once to ensure auth validation is performed exactly once,
+// The method uses sync.Once to ensure functional ready validation is performed exactly once,
 // even if multiple goroutines call SendMsg concurrently.
-func (cs *clientStream) waitForAuthConfirmation() error {
-	cs.authOnce.Do(func() {
+func (cs *clientStream) waitForFunctionalReadyConfirmation() error {
+	cs.functionalReadyOnce.Do(func() {
 		// Get response headers from server - this will block until server sends headers
 		responseHeaders, err := cs.Header()
 		if err != nil {
-			cs.authErr = status.Errorf(codes.Unauthenticated, "failed to get response headers for auth: %v", err)
+			cs.functionalReadyErr = status.Errorf(codes.FailedPrecondition, "failed to get response headers for functional ready check: %v", err)
 			return
 		}
 
-		// Validate the auth response using the credentials' ValidateAuthResponse method
-		if cs.validateAuthFn != nil {
-			if err := cs.validateAuthFn(responseHeaders); err != nil {
-				cs.authErr = status.Errorf(codes.Unauthenticated, "auth validation failed: %v", err)
+		// Validate the functional ready response using the credentials' ValidateStreamFunctionalReady method
+		if cs.validateFunctionalReadyFn != nil {
+			if err := cs.validateFunctionalReadyFn(responseHeaders); err != nil {
+				cs.functionalReadyErr = status.Errorf(codes.FailedPrecondition, "stream functional ready validation failed: %v", err)
 				return
 			}
 		}
 
-		// Auth confirmed successfully
-		cs.authConfirmed = true
+		// Functional ready confirmed successfully
+		cs.functionalReadyConfirmed = true
 	})
 
-	return cs.authErr
+	return cs.functionalReadyErr
 }
 
 func (cs *clientStream) replayBufferLocked(attempt *csAttempt) error {
@@ -1006,11 +1007,11 @@ func (cs *clientStream) SendMsg(m any) (err error) {
 		}
 	}()
 
-	// If credentials require auth confirmation, wait for server response before sending.
-	// This is used for streaming RPCs where the server validates auth (e.g., JWT tokens)
-	// and we need to confirm auth before sending subsequent messages.
-	if cs.waitForAuth && !cs.authConfirmed {
-		if err := cs.waitForAuthConfirmation(); err != nil {
+	// If credentials require functional ready confirmation, wait for server response before sending.
+	// This is used for streaming RPCs where the server performs initialization tasks
+	// (auth, quotas, feature flags, etc.) and we need to confirm readiness before sending messages.
+	if cs.waitForFunctionalReady && !cs.functionalReadyConfirmed {
+		if err := cs.waitForFunctionalReadyConfirmation(); err != nil {
 			return err
 		}
 	}

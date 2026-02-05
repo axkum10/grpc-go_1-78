@@ -51,36 +51,47 @@ type PerRPCCredentials interface {
 	RequireTransportSecurity() bool
 }
 
-// WaitForAuthCredentials is an optional interface that can be implemented by
-// PerRPCCredentials to indicate that the client should wait for authentication
-// confirmation from the server before sending messages on a stream.
+// WaitForStreamFunctionalReady is an optional interface that can be implemented
+// by PerRPCCredentials to indicate that the client should wait for server-side
+// functional readiness confirmation before sending messages on a stream.
 //
-// This is useful for bidirectional streaming RPCs where the server validates
-// credentials (e.g., JWT tokens) and sends back a response. Without this,
-// messages could be sent before authentication validation is complete on the
-// server side, leading to potential message loss if auth fails.
+// This is useful for bidirectional streaming RPCs where the server needs to perform
+// initialization tasks (e.g., authentication, authorization, quota checks, feature
+// flag validation, resource warm-up) before accepting messages. Without this,
+// messages could be sent before the server is ready to process them, leading to
+// potential message loss or wasted requests if initialization fails.
 //
 // When implemented, the client will:
 //  1. Send the initial request with credentials
 //  2. Wait for server response headers
-//  3. Call ValidateAuthResponse to validate the auth result
+//  3. Call ValidateStreamFunctionalReady to validate the server's ready status
 //  4. Only then allow subsequent messages to be sent
+//
+// This interface is optional for both client and server. Clients that don't implement
+// this interface will behave as before (no blocking). Servers that don't send
+// functional ready headers will cause clients to block until headers are received
+// or timeout occurs.
 //
 // See https://github.com/grpc/grpc-go/issues/8861 for more details.
 //
 // This API is experimental.
-type WaitForAuthCredentials interface {
+type WaitForStreamFunctionalReady interface {
 	PerRPCCredentials
-	// WaitForServerAuth indicates whether the client should wait for authentication
-	// confirmation from the server before sending messages. If this returns true,
-	// the client will block on SendMsg until the server has responded and the
-	// response has been validated via ValidateAuthResponse.
-	WaitForServerAuth() bool
-	// ValidateAuthResponse validates the server's response headers to confirm
-	// authentication was successful. This is called after receiving the server's
-	// initial response headers. Returns nil if auth is confirmed, or an error
-	// if auth failed. The error will be returned to the caller of SendMsg.
-	ValidateAuthResponse(responseHeaders map[string][]string) error
+	// WaitForStreamFunctionalReady indicates whether the client should wait for
+	// functional readiness confirmation from the server before sending messages.
+	// If this returns true, the client will block on SendMsg until the server
+	// has responded and the response has been validated via ValidateStreamFunctionalReady.
+	WaitForStreamFunctionalReady() bool
+	// ValidateStreamFunctionalReady validates the server's response headers to confirm
+	// the stream is functionally ready. This is called after receiving the server's
+	// initial response headers. Returns nil if the stream is ready, or an error
+	// if not ready. The error will be returned to the caller of SendMsg.
+	//
+	// Common headers to check include:
+	//   - x-stream-ready: "true" / "false"
+	//   - x-stream-ready-status: "ok", "error"
+	//   - x-stream-ready-error: error message if failed
+	ValidateStreamFunctionalReady(responseHeaders map[string][]string) error
 }
 
 // SecurityLevel defines the protection level on an established connection.
