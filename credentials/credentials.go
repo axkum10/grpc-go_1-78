@@ -66,6 +66,8 @@ type PerRPCCredentials interface {
 //  3. Call ValidateAuthResponse to validate the auth result
 //  4. Only then allow subsequent messages to be sent
 //
+// See https://github.com/grpc/grpc-go/issues/8861 for more details.
+//
 // This API is experimental.
 type WaitForAuthCredentials interface {
 	PerRPCCredentials

@@ -640,6 +640,7 @@ type clientStream struct {
 	// waitForAuth indicates whether the client should wait for authentication
 	// confirmation from the server before sending messages. This is set when
 	// the credentials implement WaitForAuthCredentials and WaitForServerAuth() returns true.
+	// See https://github.com/grpc/grpc-go/issues/8861 for more details.
 	waitForAuth bool
 	// authConfirmed indicates whether the server has confirmed authentication.
 	// Once set to true, subsequent SendMsg calls proceed without blocking.
